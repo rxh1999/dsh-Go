@@ -42,9 +42,11 @@ class WebFilePick {
   /// The files whose content URIs the page may carry.
   final List<String> uris;
 
-  /// The files it may not, over [maxWebFileBytes].
+  /// The files it may not, either over [maxWebFileBytes] or with unknown size.
   final List<WebFileOversize> oversize;
 }
+
+typedef WebOversizeHandler = Future<void> Function(List<WebFileOversize> files);
 
 /// A document chooser belongs to the document that requested it. Navigation,
 /// a renderer loss or disposal retires it even if Android returns a file later.
@@ -52,7 +54,7 @@ class WebFilePick {
 /// picker's `file://docs/…` and `file://media/…`), without copying file contents
 /// into Dart or granting the page access to app-private filesystem paths.
 class WebFileChooser {
-  WebFileChooser({MethodChannel? channel, bool? ohos, this._canChoose, this.onOversize})
+  WebFileChooser({MethodChannel? channel, bool? ohos, this._canChoose, this.captureOversize})
     : _channel = channel ?? const MethodChannel('dsh/web-files'),
       _ohos = ohos ?? Platform.operatingSystem == 'ohos';
 
@@ -60,20 +62,21 @@ class WebFileChooser {
   final bool _ohos;
   final bool Function()? _canChoose;
 
-  /// Called once the page has been given its answer, with the picks it may not
-  /// carry: whoever handles them runs after the file input is done with.
-  final Future<void> Function(List<WebFileOversize> files)? onOversize;
+  /// Captures the origin before opening the picker. The returned handler runs
+  /// independently of the file input if there are picks the page cannot carry.
+  final FutureOr<WebOversizeHandler> Function()? captureOversize;
 
   int _generation = 0;
   bool _disposed = false;
   bool _busy = false;
   String? _owner;
 
-  Future<void> attach(WebViewController controller) async {
+  Future<void> attach(WebViewController controller, {bool Function()? isCurrent}) async {
+    Future<String?> currentUrl() async => isCurrent?.call() == false ? null : controller.currentUrl();
     final platform = controller.platform;
     if (platform is AndroidWebViewController) {
       await platform.setOnShowFileSelector(
-        (params) => choose(params, webViewId: platform.webViewIdentifier, currentUrl: controller.currentUrl),
+        (params) => choose(params, webViewId: platform.webViewIdentifier, currentUrl: currentUrl),
       );
     } else if (_ohos) {
       // oh-flutter's controller has the same method and fields, but its package
@@ -88,7 +91,7 @@ class WebFileChooser {
             mode: FileSelectorMode.values.byName((params.mode as Enum).name),
           ),
           webViewId: ohos.webViewIdentifier as int,
-          currentUrl: controller.currentUrl,
+          currentUrl: currentUrl,
         ),
       );
     }
@@ -113,6 +116,8 @@ class WebFileChooser {
       if (!current() || uri == null || !['http', 'https'].contains(uri.scheme)) {
         return const [];
       }
+      final handler = await captureOversize?.call();
+      if (!current()) return const [];
       _owner = owner;
       final pick = _parse(
         await _channel.invokeMethod<Object?>('pick', {
@@ -133,7 +138,6 @@ class WebFileChooser {
       if (params.mode == FileSelectorMode.open && pick.uris.length > 1) return const [];
       // The page's input is answered from here: a file it cannot hold is the
       // app's problem, and the answer must not wait for it.
-      final handler = onOversize;
       if (pick.oversize.isNotEmpty && handler != null) unawaited(handler(pick.oversize));
       return pick.uris;
     } on Object {

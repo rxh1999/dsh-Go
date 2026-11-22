@@ -39,9 +39,10 @@ class WebFilePolicyTest {
         assertNull(WebFilePolicy.declaredBytes(null, null))
     }
 
-    @Test fun aKnownSizeOverTheCeilingIsRefusedAndAnUnknownOneStaysAllowed() {
+    @Test fun onlyKnownSizesWithinTheCeilingCanReachTheWebView() {
         val max = 32L * 1024 * 1024
-        assertTrue(WebFilePolicy.withinLimit(null, max))
+        assertFalse(WebFilePolicy.withinLimit(null, max))
+        assertTrue(WebFilePolicy.withinLimit(1, max))
         assertTrue(WebFilePolicy.withinLimit(max, max))
         assertFalse(WebFilePolicy.withinLimit(max + 1, max))
     }

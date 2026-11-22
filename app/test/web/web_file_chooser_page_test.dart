@@ -3,6 +3,8 @@
 // ignore_for_file: depend_on_referenced_packages
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:dsh_app/l10n/l10n.dart';
 import 'package:dsh_app/ui/plugins/islands/island_platform.dart';
@@ -23,10 +25,11 @@ const _file = 'content://documents/document/picked';
 const _params = FileSelectorParams(isCaptureEnabled: false, acceptTypes: [], mode: FileSelectorMode.open);
 const _big = 'content://downloads/document/big';
 
-Map<String, Object?> _pick({List<String> uris = const [], List<Map<String, Object?>> rejected = const []}) =>
-    {'uris': uris, 'rejected': rejected};
-Map<String, Object?> _oversize({int bytes = 33 * 1024 * 1024}) =>
-    {'uri': _big, 'name': 'big.bin', 'bytes': bytes};
+Map<String, Object?> _pick({List<String> uris = const [], List<Map<String, Object?>> rejected = const []}) => {
+  'uris': uris,
+  'rejected': rejected,
+};
+Map<String, Object?> _oversize({int? bytes = 33 * 1024 * 1024}) => {'uri': _big, 'name': 'big.bin', 'bytes': bytes};
 
 class _AndroidPlatform extends FakeWebViewPlatform {
   @override
@@ -80,13 +83,18 @@ void main() {
     messenger.setMockMethodCallHandler(_channel, null);
   });
 
-  Future<void> pumpPage(
-    WidgetTester tester, {
-    Future<void> Function(List<WebStagedFile> staged, List<WebFileOversize> refused)? onOversize,
-  }) async {
+  Future<void> pumpPage(WidgetTester tester, {DshWebLink? link, WebStagedFilesHandler? onOversize}) async {
     usePhoneView(tester);
     await tester.pumpWidget(
-      testApp(WebViewPage(url: Uri.parse('http://127.0.0.1:3080/'), title: '网页', dshWeb: true, onOversize: onOversize)),
+      testApp(
+        WebViewPage(
+          url: Uri.parse('http://127.0.0.1:3080/'),
+          title: '网页',
+          dshWeb: true,
+          link: link,
+          onOversize: onOversize,
+        ),
+      ),
     );
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
     await tester.pump();
@@ -151,12 +159,25 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('a file with unknown size is refused with a notice when the page has no drop host', (tester) async {
+    await pumpPage(tester);
+    messenger.setMockMethodCallHandler(_channel, (call) async {
+      calls.add(call);
+      return call.method == 'pick' ? _pick(rejected: [_oversize(bytes: null)]) : null;
+    });
+    expect(await web.controller.selector!(_params), isEmpty);
+    await tester.pump();
+    expect(find.widgetWithText(SnackBar, appL10n.webAttachmentSizeUnknown), findsOneWidget);
+    expect(calls.where((c) => c.method == 'stage'), isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('an oversized pick is staged for the app and the page carries nothing', (tester) async {
     final staged = Completer<List<WebStagedFile>>();
     final refused = Completer<List<WebFileOversize>>();
     await pumpPage(
       tester,
-      onOversize: (files, cannotRead) async {
+      onOversize: (files, cannotRead, _) async {
         staged.complete(files);
         refused.complete(cannotRead);
       },
@@ -179,5 +200,50 @@ void main() {
     expect(await refused.future, isEmpty);
     expect(calls.where((c) => c.method == 'stage'), hasLength(1));
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('an upload cannot queue its paste on a replacement page', (tester) async {
+    final link = DshWebLink();
+    final boundPaste = Completer<Future<bool> Function(String)>();
+    await pumpPage(tester, link: link, onOversize: (_, _, paste) async => boundPaste.complete(paste));
+    final original = web.controller;
+    const target = '["document",1,"session-a","session-a"]';
+    original.results = (script) {
+      if (script == 'window.__dshAppUploadTarget?.() ?? null') return jsonEncode(target);
+      const prefix = '(window.__dshAppCompose(';
+      final draft = jsonDecode(script.substring(script.indexOf(prefix) + prefix.length, script.length - 8)) as Map;
+      expect(draft['uploadTarget'], target);
+      original.post('DshAppCompose', jsonEncode({'requestId': draft['requestId'], 'text': true, 'files': 0}));
+      return true;
+    };
+    messenger.setMockMethodCallHandler(_channel, (call) async {
+      return switch (call.method) {
+        'pick' => _pick(rejected: [_oversize()]),
+        'stage' => {'path': '/data/cache/web-files/1/big.bin', 'name': 'big.bin', 'bytes': 3},
+        _ => null,
+      };
+    });
+    expect(await original.selector!(_params), isEmpty);
+    await tester.pump();
+    final paste = await boundPaste.future;
+    expect(await paste('/path/on/old/host'), isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+    web.controllers.clear();
+    await pumpPage(tester, link: link);
+    var calledReplacement = false;
+    web.controller.results = (_) => calledReplacement = true;
+    expect(await paste('/path/on/old/host'), isFalse);
+    expect(calledReplacement, isFalse);
+    expect(web.controller.scripts.any((script) => script.contains('/path/on/old/host')), isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  test('the paste bridge checks the visible session after asynchronous navigation', () async {
+    final result = await Process.run('node', [
+      'test/web/support/compose_pair_harness.mjs',
+      'assets/web/dsh_web_open.js',
+      '--upload',
+    ]);
+    expect(result.exitCode, 0, reason: result.stderr.toString());
   });
 }

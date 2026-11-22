@@ -44,15 +44,8 @@ internal object WebFilePolicy {
         return null
     }
 
-    /**
-     * Whether the page may carry a file of [bytes].
-     *
-     * An unknown size stays allowed: refusing everything unmeasured would
-     * break the providers that answer nothing, and the picker would look
-     * broken for ordinary files. A known size over [maxBytes] is the case a
-     * WebView renderer cannot hold, and the one this ceiling exists for.
-     */
-    fun withinLimit(bytes: Long?, maxBytes: Long): Boolean = bytes == null || bytes <= maxBytes
+    /** Only a file with a known size at or below the ceiling may reach the WebView. */
+    fun withinLimit(bytes: Long?, maxBytes: Long): Boolean = bytes != null && bytes <= maxBytes
 
     /**
      * The name of a staged copy. One path component, never `.` or `..`, no

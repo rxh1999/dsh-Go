@@ -22,6 +22,12 @@ import 'web_navigation.dart';
 import 'web_target.dart';
 import 'web_view_guard.dart';
 
+typedef WebStagedFilesHandler = Future<void> Function(
+  List<WebStagedFile> staged,
+  List<WebFileOversize> refused,
+  Future<bool> Function(String text) paste,
+);
+
 /// Full-bleed WebView with floating glass controls (back · title · reload · open).
 ///
 /// The page's own background runs edge to edge — behind the status bar, the
@@ -102,11 +108,9 @@ class WebViewPage extends StatefulWidget {
   /// the client's stored selection; null for none).
   final ValueChanged<String?>? onSession;
 
-  /// A file the page cannot carry (over [maxWebFileBytes]), already copied
-  /// into the app cache: [staged] can go to the Host and be mentioned in the
-  /// composer, [refused] could not even be read. Null leaves the page saying
-  /// the file is too large.
-  final Future<void> Function(List<WebStagedFile> staged, List<WebFileOversize> refused)? onOversize;
+  /// Receives files the page cannot carry. The paste callback only fills the composer
+  /// from which the picker was opened. Null leaves the page showing a notice.
+  final WebStagedFilesHandler? onOversize;
 
   bool get _adapt => dshWeb && phoneLayout;
 
@@ -633,7 +637,7 @@ class _WebViewPageState extends State<WebViewPage> {
   late WebViewController _controller;
   late final AppLifecycleListener _lifecycle;
   late final WebViewGuard _guard = WebViewGuard(onGone: _onRendererGone);
-  late final WebFileChooser _files = WebFileChooser(onOversize: _onOversize);
+  late final WebFileChooser _files = WebFileChooser(captureOversize: _captureOversize);
   int _progress = 0;
   bool _loading = true;
   String? _error;
@@ -683,7 +687,7 @@ class _WebViewPageState extends State<WebViewPage> {
     await Future.wait(
       [
         controller.setJavaScriptMode(JavaScriptMode.unrestricted),
-        _files.attach(controller),
+        _files.attach(controller, isCurrent: () => mounted && !_gone && identical(controller, _controller)),
         controller.setNavigationDelegate(
           NavigationDelegate(
             // DSH Web keeps to its own origin; other pages open in the browser.
@@ -891,32 +895,55 @@ class _WebViewPageState extends State<WebViewPage> {
     if (problem != null) _notice(problem);
   }
 
-  /// A picked file the renderer must not be handed: to the Host when the
-  /// caller has a way to put it there, otherwise one sentence — a picker that
-  /// quietly did nothing reads as a broken page.
-  Future<void> _onOversize(List<WebFileOversize> files) async {
+  bool _canPasteUpload(WebViewController controller) =>
+      mounted && identical(controller, _controller) && !_loading && !_gone && _error == null;
+
+  Future<WebOversizeHandler> _captureOversize() async {
     final carry = widget.onOversize;
     if (carry == null) {
-      _notice(appL10n.webAttachmentTooLarge);
-      return;
+      return (files) async => _notice(
+        files.any((file) => file.bytes == 0) ? appL10n.webAttachmentSizeUnknown : appL10n.webAttachmentTooLarge,
+      );
     }
-    final staged = <WebStagedFile>[];
-    final refused = <WebFileOversize>[];
-    for (final file in files) {
-      final copy = await _files.stage(file);
-      if (copy == null) {
-        refused.add(file);
-      } else {
-        staged.add(copy);
+
+    final controller = _controller;
+    final link = widget.link;
+    String? token;
+    if (link != null && _canPasteUpload(controller)) {
+      try {
+        final raw = await controller
+            .runJavaScriptReturningResult('window.__dshAppUploadTarget?.() ?? null')
+            .timeout(const Duration(seconds: 1));
+        final value = raw is String ? jsonDecode(raw) : null;
+        if (value is String) token = value;
+      } on Object {
+        // No confirmed composer. Still let the host take the file.
       }
     }
-    try {
-      await carry(staged, refused);
-    } finally {
-      for (final copy in staged) {
-        await WebFileChooser.discard(copy);
+
+    return (files) async {
+      final staged = <WebStagedFile>[];
+      final refused = <WebFileOversize>[];
+      try {
+        for (final file in files) {
+          final copy = await _files.stage(file);
+          if (copy == null) {
+            refused.add(file);
+          } else {
+            staged.add(copy);
+          }
+        }
+        await carry(staged, refused, (text) async {
+          if (link == null || token == null) return false;
+          final result = await link._compose(text, upload: (page: this, controller: controller, token: token));
+          return result.text;
+        });
+      } finally {
+        for (final copy in staged) {
+          await WebFileChooser.discard(copy);
+        }
       }
-    }
+    };
   }
 
   void _notice(String text) {
@@ -1520,9 +1547,18 @@ class DshWebLink {
     String text, {
     List<({String name, String? type, String base64})> files = const [],
     Duration timeout = const Duration(seconds: 30),
+  }) => _compose(text, files: files, timeout: timeout);
+
+  Future<WebComposeResult> _compose(
+    String text, {
+    List<({String name, String? type, String base64})> files = const [],
+    Duration timeout = const Duration(seconds: 30),
+    ({_WebViewPageState page, WebViewController controller, String token})? upload,
   }) async {
+    bool current() => upload == null || (_page == upload.page && upload.page._canPasteUpload(upload.controller));
+    if (!current()) return const WebComposeResult();
     final done = Completer<WebComposeResult>();
-    final requestId = _correlateComposeReplies ? '${++_composeNumber}' : null;
+    final requestId = _correlateComposeReplies || upload != null ? '${++_composeNumber}' : null;
     if (requestId == null) {
       _composing = done;
     } else {
@@ -1530,6 +1566,7 @@ class DshWebLink {
     }
     final draft = {
       'requestId': ?requestId,
+      'uploadTarget': ?upload?.token,
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) 'composerAttachmentCount': true,
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) 'requireOpenedTarget': true,
       'text': text,
@@ -1538,10 +1575,26 @@ class DshWebLink {
       ],
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) 'guardTextFallback': true,
     };
-    final script = 'window.__dshAppCompose && window.__dshAppCompose(${jsonEncode(draft)});';
+    final encoded = jsonEncode(draft);
+    final script = 'window.__dshAppCompose && window.__dshAppCompose($encoded);';
     try {
-      await _send(script);
-      return await done.future.timeout(timeout, onTimeout: () => const WebComposeResult());
+      if (upload == null) {
+        await _send(script);
+      } else {
+        // Uploads belong to one document and must never enter either queue.
+        try {
+          final dispatched = await upload.controller.runJavaScriptReturningResult(
+            'typeof window.__dshAppUploadTarget === "function" && '
+            'window.__dshAppUploadTarget() === ${jsonEncode(upload.token)} && '
+            '(window.__dshAppCompose($encoded), true)',
+          );
+          if (dispatched != true) return const WebComposeResult();
+        } on Object {
+          return const WebComposeResult();
+        }
+      }
+      final result = await done.future.timeout(timeout, onTimeout: () => const WebComposeResult());
+      return current() ? result : const WebComposeResult();
     } finally {
       if (requestId != null) {
         _composeReplies.remove(requestId);
@@ -1553,17 +1606,16 @@ class DshWebLink {
   }
 
   void _composed(String message) {
-    Completer<WebComposeResult>? done;
-    if (_correlateComposeReplies) {
-      try {
-        final reply = jsonDecode(message);
-        if (reply is! Map || reply['requestId'] is! String) return;
+    var done = _composing;
+    try {
+      final reply = jsonDecode(message);
+      if (reply is Map && reply['requestId'] is String) {
         done = _composeReplies.remove(reply['requestId']);
-      } on FormatException {
+      } else if (_correlateComposeReplies) {
         return;
       }
-    } else {
-      done = _composing;
+    } on FormatException {
+      if (_correlateComposeReplies) return;
     }
     if (done == null || done.isCompleted) return;
     done.complete(WebComposeResult.parse(message));

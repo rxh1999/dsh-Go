@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:dsh_client/dsh_client.dart';
 
@@ -7,6 +8,7 @@ import '../link_status.dart';
 import 'local_forward.dart';
 import 'remote_bootstrap.dart';
 import 'remote_shell.dart';
+import 'ssh_drop_cleanup.dart';
 import 'ssh_host_config.dart';
 import 'ssh_transport.dart';
 
@@ -64,6 +66,7 @@ class SshHostLink implements HostLink, HostFileDrop {
     this.pinHostKey,
     SshTransportFactory? transportFactory,
     DshClientConnector? connectClient,
+    SshDropCleanup? dropCleanup,
     Stream<void>? kicks,
     Backoff? backoff,
     this.remoteEnvironment = const {},
@@ -73,8 +76,16 @@ class SshHostLink implements HostLink, HostFileDrop {
     this.retryFirstOpen = true,
   }) : _transportFactory = transportFactory ?? DartSshTransport.connect,
        _connectClient = connectClient ?? _defaultConnector,
+       _dropCleanup = dropCleanup ?? SshDropCleanup(),
        _backoff = backoff ?? Backoff() {
     _kickSub = kicks?.listen((_) => kick());
+    _dropCleanupSub = _dropCleanup.released.listen((drop) {
+      final live = _transport;
+      final fingerprint = _transportFingerprint;
+      if (live != null && !live.isClosed && fingerprint != null && _dropScope(fingerprint) == drop.scope) {
+        unawaited(_removePartialDrop(live, drop));
+      }
+    });
   }
 
   SshHostConfig _config;
@@ -83,6 +94,7 @@ class SshHostLink implements HostLink, HostFileDrop {
   final HostKeyPinner? pinHostKey;
   final SshTransportFactory _transportFactory;
   final DshClientConnector _connectClient;
+  final SshDropCleanup _dropCleanup;
   final Backoff _backoff;
   final Map<String, String> remoteEnvironment;
   final Duration keepAliveInterval;
@@ -98,10 +110,12 @@ class SshHostLink implements HostLink, HostFileDrop {
   final _clients = StreamController<DshClient>.broadcast();
   final _delay = InterruptibleDelay();
   StreamSubscription<void>? _kickSub;
+  late final StreamSubscription<SshPartialDrop> _dropCleanupSub;
   StreamSubscription<DshConnectionState>? _muxSub;
   HostLinkStatus _status = HostLinkStatus.idle;
 
   SshTransport? _transport;
+  String? _transportFingerprint;
   SshTransport? _connectingTransport;
   Completer<SshTransport> _ready = Completer<SshTransport>();
   LocalForwarder? _forwarder;
@@ -136,34 +150,77 @@ class SshHostLink implements HostLink, HostFileDrop {
   /// Configured working directory with `~` resolved on the remote.
   String? get resolvedWorkingDirectory => RemoteDshBootstrap.absolutePath(_config.workingDirectory, _endpoint?.home);
 
-  /// Dropped files land under the link's working directory — where the Host's
-  /// own tools already read and write — in one folder per drop, so the file
-  /// keeps its name and the folder is the thing to delete afterwards.
-  static const _dropRoot = '.dsh-go-uploads';
+  /// Dropped files land in one folder per drop under the link's working directory.
+  final _dropNonce = Random.secure().nextInt(0x100000000).toRadixString(16);
   int _drops = 0;
+
+  SshDropScope _dropScope(String fingerprint) =>
+      (hostId: _config.id, fingerprint: fingerprint, user: _config.user.trim());
 
   @override
   Future<String> dropFile(String name, Stream<List<int>> source) async {
     final transport = _transport;
+    final fingerprint = _transportFingerprint;
     // No configured cwd is the home directory: that is where `dsh web` runs.
     final workspace = resolvedWorkingDirectory ?? _endpoint?.home;
-    if (transport == null || _status.phase != HostLinkPhase.connected || workspace == null) {
+    if (transport == null || fingerprint == null || _status.phase != HostLinkPhase.connected || workspace == null) {
       throw HostLinkError(HostLinkErrorKind.unreachable, appL10n.webFileDropFailed, retryable: true);
     }
-    final folder = '$workspace/$_dropRoot/${DateTime.now().millisecondsSinceEpoch}-${++_drops}';
-    final made = await transport.run('mkdir -p ${shQuote(folder)}');
-    if (!made.ok) {
-      throw HostLinkError(HostLinkErrorKind.other, appL10n.webFileDropFailed, detail: made.stderr.trim());
-    }
-    final path = '$folder/${_dropName(name)}';
+    final root = '$workspace/${SshDropCleanup.remoteRoot}';
+    final folder = '$root/${DateTime.now().millisecondsSinceEpoch}-$_dropNonce-${++_drops}';
+    final fileName = _dropName(name);
+    final path = '$folder/$fileName';
+    final partial = (
+      scope: _dropScope(fingerprint),
+      folder: folder,
+      stagingName: fileName == '.partial' ? '.partial-file' : '.partial',
+    );
+    final stagedPath = '$folder/${partial.stagingName}';
     try {
-      await transport.writeFile(path, source);
+      await _dropCleanup.start(partial);
     } on Object catch (e) {
-      // A half-written file is not a drop: take the folder back out.
-      unawaited(transport.run('rm -rf ${shQuote(folder)}').then((_) {}, onError: (Object _) {}));
       throw HostLinkError(HostLinkErrorKind.other, appL10n.webFileDropFailed, detail: '$e');
     }
+    try {
+      final made = await transport.run('mkdir -p ${shQuote(root)} && mkdir -m 700 ${shQuote(folder)}');
+      if (!made.ok) {
+        throw HostLinkError(HostLinkErrorKind.other, appL10n.webFileDropFailed, detail: made.stderr.trim());
+      }
+      await transport.writeFile(stagedPath, source);
+      await transport.renameFile(stagedPath, path);
+    } on Object catch (e) {
+      _dropCleanup.release(partial);
+      if (e is HostLinkError) rethrow;
+      throw HostLinkError(HostLinkErrorKind.other, appL10n.webFileDropFailed, detail: '$e');
+    }
+    // The published file is usable even if the local marker could not be cleared.
+    await _dropCleanup.forget(partial).catchError((_) {});
     return path;
+  }
+
+  Future<void> _removePartialDrop(SshTransport transport, SshPartialDrop partial) async {
+    try {
+      // A rename may succeed just before its confirmation is lost. Only remove
+      // our staging file and an empty directory, never the published name.
+      final path = '${partial.folder}/${partial.stagingName}';
+      final result = await transport.run(
+        'rm -f ${shQuote(path)} && (rmdir ${shQuote(partial.folder)} 2>/dev/null || :)',
+      );
+      if (result.ok) await _dropCleanup.forget(partial);
+    } catch (_) {
+      // A lost SSH session cannot clean up its own file. Retry on reconnect.
+    }
+  }
+
+  Future<void> _recoverPartialDrops(SshTransport transport, String fingerprint) async {
+    try {
+      for (final partial in await _dropCleanup.pending(_dropScope(fingerprint))) {
+        if (_closed || !identical(_transport, transport)) return;
+        await _removePartialDrop(transport, partial);
+      }
+    } catch (_) {
+      // The host can still connect when the local marker store is unavailable.
+    }
   }
 
   /// One path component: the name came from another app's document provider.
@@ -249,8 +306,10 @@ class SshHostLink implements HostLink, HostFileDrop {
     at(HostLinkStep.connect, detail: _config.address);
     final secrets = await _loadSecrets();
     _checkOpen();
+    String? fingerprint;
     final transport = await _transportFactory(SshConnectParams.of(_config, secrets), (key) async {
       if (_closed) return false;
+      fingerprint = key.fingerprint;
       at(HostLinkStep.verifyHostKey, detail: '${key.shortType} ${key.fingerprint}');
       switch (checkHostKey(_config, key)) {
         case HostKeyVerdict.trusted:
@@ -291,7 +350,7 @@ class SshHostLink implements HostLink, HostFileDrop {
         if (_config.remotePort < 1 || _config.remotePort > 65535 || token == null || token.isEmpty) {
           throw HostLinkError(HostLinkErrorKind.loginFailed, appL10n.remoteErrAttachSettings);
         }
-        // Attach-only never executes a remote command or touches managed state.
+        // Attaching never starts or stops DSH or touches its managed state.
         endpoint = RemoteDshEndpoint(port: _config.remotePort, token: token, reused: true);
       } else {
         endpoint = await RemoteDshBootstrap(
@@ -339,7 +398,7 @@ class SshHostLink implements HostLink, HostFileDrop {
         _forwarder = forwarder;
       }
       _connectingTransport = null;
-      _installTransport(transport);
+      _installTransport(transport, fingerprint);
 
       at(HostLinkStep.login);
       final client = await _ensureClient(endpoint, previous);
@@ -435,9 +494,11 @@ class SshHostLink implements HostLink, HostFileDrop {
     }
   }
 
-  void _installTransport(SshTransport transport) {
+  void _installTransport(SshTransport transport, String? fingerprint) {
     _transport = transport;
+    _transportFingerprint = fingerprint;
     if (!_ready.isCompleted) _ready.complete(transport);
+    if (fingerprint != null) unawaited(_recoverPartialDrops(transport, fingerprint));
     unawaited(
       transport.done.then((_) {
         if (identical(_transport, transport)) {
@@ -459,6 +520,7 @@ class SshHostLink implements HostLink, HostFileDrop {
     _keepAlive = null;
     final transport = _transport;
     _transport = null;
+    _transportFingerprint = null;
     if (_ready.isCompleted) _ready = Completer<SshTransport>();
     transport?.close();
     _forwarder?.dropConnections();
@@ -654,6 +716,7 @@ class SshHostLink implements HostLink, HostFileDrop {
     _connectingTransport = null;
     connecting?.close();
     await _kickSub?.cancel();
+    await _dropCleanupSub.cancel();
     await _muxSub?.cancel();
     _teardownTransport();
     await _forwarder?.close();

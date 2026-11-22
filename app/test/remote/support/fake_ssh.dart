@@ -27,6 +27,11 @@ class FakeRemote {
   void killServer() => pid = null;
 
   RemoteExecResult run(String script) {
+    final cleanup = RegExp(r"^rm -f '([^']+)' && \(rmdir ").firstMatch(script);
+    if (cleanup != null) {
+      files.remove(cleanup.group(1));
+      return const RemoteExecResult(0, '', '');
+    }
     if (script.contains('DSHAPP started')) {
       if (!dshInstalled) return const RemoteExecResult(127, 'DSHAPP home /home/me\nDSHAPP nodsh\n', '');
       launches++;
@@ -90,6 +95,7 @@ class FakeTransport implements SshTransport {
   final _done = Completer<void>();
   final List<String> scripts = [];
   final List<(String, int)> tunnels = [];
+  void Function()? afterRename;
 
   /// Simulates the network dropping the connection.
   void drop() {
@@ -98,19 +104,34 @@ class FakeTransport implements SshTransport {
 
   @override
   Future<void> writeFile(String path, Stream<List<int>> source) async {
-    if (_done.isCompleted) throw const HostLinkError(HostLinkErrorKind.unreachable, 'closed', retryable: true);
-    final bytes = <int>[];
+    _checkConnected();
+    final bytes = remote.files[path] = <int>[];
     await for (final chunk in source) {
+      _checkConnected();
       bytes.addAll(chunk);
     }
-    remote.files[path] = bytes;
+    _checkConnected();
+  }
+
+  @override
+  Future<void> renameFile(String path, String destination) async {
+    _checkConnected();
+    final bytes = remote.files.remove(path);
+    if (bytes == null) throw const HostLinkError(HostLinkErrorKind.other, 'missing file');
+    remote.files[destination] = bytes;
+    afterRename?.call();
+    _checkConnected();
   }
 
   @override
   Future<RemoteExecResult> run(String script, {Duration timeout = const Duration(seconds: 30)}) async {
-    if (_done.isCompleted) throw const HostLinkError(HostLinkErrorKind.unreachable, 'closed', retryable: true);
+    _checkConnected();
     scripts.add(script);
     return remote.run(script);
+  }
+
+  void _checkConnected() {
+    if (isClosed) throw const HostLinkError(HostLinkErrorKind.unreachable, 'closed', retryable: true);
   }
 
   @override

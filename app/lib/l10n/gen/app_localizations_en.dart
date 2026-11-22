@@ -28040,10 +28040,17 @@ class L10nEn extends L10n {
   String get webAttachmentTooLarge => 'Attachment is too large for DSH Web';
 
   @override
-  String get webFileDropped => 'Too large for the page: put on the computer, path filled in';
+  String get webAttachmentSizeUnknown => 'Couldn’t verify the attachment size. It wasn’t added to DSH Web.';
 
   @override
-  String get webFileDropFailed => 'Too large for the page, and the computer didn’t take it';
+  String get webFileDropped => 'File uploaded to the computer. Its path is in the input box.';
+
+  @override
+  String get webFileDropFailed => 'Couldn’t upload the file to the computer';
+
+  @override
+  String get webFilePathCopied =>
+      'File uploaded to the original host. Paste the copied path in the original conversation.';
 
   @override
   String get webTextCopied => 'Text copied. Paste it into the input box.';

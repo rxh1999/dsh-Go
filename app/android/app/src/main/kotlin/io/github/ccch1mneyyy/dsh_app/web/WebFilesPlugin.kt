@@ -27,10 +27,9 @@ import java.util.concurrent.Executors
 /**
  * A foreground web upload: system-selected content URIs, no persistent grant.
  *
- * The page only ever receives URIs it can carry: a picked file over the
- * caller's byte ceiling is reported back under `rejected` (name, size, URI)
- * instead, so the app can take it to the Host another way. `stage` copies such
- * a file into the app cache, streaming, for exactly that.
+ * Files above the caller's byte ceiling or with unknown sizes are returned
+ * under `rejected` with their URI, name, and nullable size. The app can use
+ * `stage` to stream these files into its cache for Host delivery.
  */
 class WebFilesPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHandler,
     PluginRegistry.ActivityResultListener {

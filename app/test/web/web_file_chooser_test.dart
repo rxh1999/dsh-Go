@@ -90,7 +90,7 @@ void main() {
     late List<WebFileOversize> oversize;
     setUp(() {
       oversize = [];
-      chooser = WebFileChooser(channel: _channel, onOversize: (files) async => oversize = files);
+      chooser = WebFileChooser(channel: _channel, captureOversize: () => (files) async => oversize = files);
     });
 
     test('stays out of the page and is handed to the app instead', () async {
@@ -108,7 +108,7 @@ void main() {
 
     test('answers the page first: the pick never waits for the hand-over', () async {
       final handed = Completer<void>();
-      chooser = WebFileChooser(channel: _channel, onOversize: (_) => handed.future);
+      chooser = WebFileChooser(channel: _channel, captureOversize: () => (_) => handed.future);
       messenger.setMockMethodCallHandler(_channel, (_) async => _pick(rejected: [_oversize()]));
       expect(await choose(), isEmpty);
       expect(handed.isCompleted, isFalse);

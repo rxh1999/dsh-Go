@@ -150,7 +150,12 @@ class _WebHomeState extends ConsumerState<WebHome> {
   /// A picked file too large for the page goes over the SSH link itself, and
   /// its path into the composer: the shape a workspace upload already uses
   /// ([stateWorkspaceFilesHint]), because that is what the model reads.
-  Future<void> _carryFiles(HostFileDrop host, List<WebStagedFile> staged, List<WebFileOversize> refused) async {
+  Future<void> _carryFiles(
+    HostFileDrop host,
+    List<WebStagedFile> staged,
+    List<WebFileOversize> refused,
+    Future<bool> Function(String text) paste,
+  ) async {
     final paths = <String>[];
     var failed = false;
     for (final copy in staged) {
@@ -161,20 +166,19 @@ class _WebHomeState extends ConsumerState<WebHome> {
       }
     }
     var notice = '';
-    if (paths.isNotEmpty) {
+    if (paths.isNotEmpty && mounted) {
       final text = [appL10n.stateWorkspaceFilesHint, for (final path in paths) '- ${jsonEncode(path)}'].join('\n');
-      final result = await _link.compose(text);
-      if (result.text) {
+      if (await paste(text)) {
         notice = appL10n.webFileDropped;
-      } else {
+      } else if (mounted) {
         await Clipboard.setData(ClipboardData(text: text));
-        notice = appL10n.webTextCopied;
+        notice = appL10n.webFilePathCopied;
       }
     }
     _tell([
-      if (notice.isNotEmpty) notice,
-      if (refused.isNotEmpty) appL10n.webAttachmentTooLarge,
       if (failed) appL10n.webFileDropFailed,
+      if (refused.isNotEmpty) appL10n.webAttachmentFailed,
+      if (notice.isNotEmpty) notice,
     ]);
   }
 
@@ -211,7 +215,7 @@ class _WebHomeState extends ConsumerState<WebHome> {
         link: _link,
         onSession: _onSession,
         // A file this page cannot hold goes over the same SSH link.
-        onOversize: files == null ? null : (staged, refused) => _carryFiles(files, staged, refused),
+        onOversize: files == null ? null : (staged, refused, paste) => _carryFiles(files, staged, refused, paste),
       ),
       // A new Noise session (a reconnect): a new page and lease.
       RelayDshWeb(:final carrier, :final session) => RemoteWebPage(

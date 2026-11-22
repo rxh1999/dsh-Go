@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:io' show Directory;
 
 import 'package:dsh_client/dsh_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../l10n/l10n.dart';
 import '../remote/link_status.dart';
 import '../remote/network_watch.dart';
 import '../remote/relay/relay_backend.dart';
+import '../remote/ssh/ssh_drop_cleanup.dart';
 import '../remote/ssh/ssh_link.dart';
 import '../remote/ssh/ssh_transport.dart';
 import '../runtime/runtime_bridge.dart';
@@ -170,6 +173,10 @@ final networkKicksProvider = Provider<Stream<void>>((ref) => networkKicks());
 /// Opens SSH connections (dartssh2); tests swap in a fake server.
 final sshTransportFactoryProvider = Provider<SshTransportFactory>((ref) => DartSshTransport.connect);
 
+final _sshDropCleanupProvider = Provider<SshDropCleanup>(
+  (ref) => SshDropCleanup(() async => Directory('${(await getApplicationSupportDirectory()).path}/ssh-upload-cleanup')),
+);
+
 /// Builds the link for one remote host. Overridable so tests can inject fake
 /// transports.
 typedef SshLinkFactory = SshHostLink Function(Ref ref, SshHostConfig config);
@@ -182,6 +189,7 @@ final sshLinkFactoryProvider = Provider<SshLinkFactory>(
       loadSecrets: () => hosts.loadSecrets(config.id),
       pinHostKey: (key) => hosts.pinHostKey(config.id, key),
       transportFactory: ref.read(sshTransportFactoryProvider),
+      dropCleanup: ref.read(_sshDropCleanupProvider),
       // No prompt here: a host becomes active only after its key was
       // confirmed in the UI (test connection / host sheet), so an unknown key
       // at this point fails closed.

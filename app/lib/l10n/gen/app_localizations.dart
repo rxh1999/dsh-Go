@@ -48530,17 +48530,29 @@ abstract class L10n {
   /// **'附件太大，没能带进网页版'**
   String get webAttachmentTooLarge;
 
+  /// No description provided for @webAttachmentSizeUnknown.
+  ///
+  /// In zh, this message translates to:
+  /// **'无法确认附件大小，未加入网页版'**
+  String get webAttachmentSizeUnknown;
+
   /// No description provided for @webFileDropped.
   ///
   /// In zh, this message translates to:
-  /// **'附件太大，已直接放到电脑，路径填在输入框里'**
+  /// **'文件已传到电脑，路径已填入输入框'**
   String get webFileDropped;
 
   /// No description provided for @webFileDropFailed.
   ///
   /// In zh, this message translates to:
-  /// **'附件太大，也没能传到电脑'**
+  /// **'文件未能传到电脑'**
   String get webFileDropFailed;
+
+  /// No description provided for @webFilePathCopied.
+  ///
+  /// In zh, this message translates to:
+  /// **'文件已传到原主机，路径已复制，请在原会话中粘贴'**
+  String get webFilePathCopied;
 
   /// No description provided for @webTextCopied.
   ///

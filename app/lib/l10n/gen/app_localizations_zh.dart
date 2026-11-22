@@ -26597,10 +26597,16 @@ class L10nZh extends L10n {
   String get webAttachmentTooLarge => '附件太大，没能带进网页版';
 
   @override
-  String get webFileDropped => '附件太大，已直接放到电脑，路径填在输入框里';
+  String get webAttachmentSizeUnknown => '无法确认附件大小，未加入网页版';
 
   @override
-  String get webFileDropFailed => '附件太大，也没能传到电脑';
+  String get webFileDropped => '文件已传到电脑，路径已填入输入框';
+
+  @override
+  String get webFileDropFailed => '文件未能传到电脑';
+
+  @override
+  String get webFilePathCopied => '文件已传到原主机，路径已复制，请在原会话中粘贴';
 
   @override
   String get webTextCopied => '文字已复制，粘贴到输入框即可';

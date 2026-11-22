@@ -342,6 +342,22 @@
     return null;
   }
 
+  // A file picker binds to this document's visible editor and its conversation.
+  // Some clients reuse the editor node as the selected conversation changes.
+  var uploadDocument = Math.random().toString(36);
+  var uploadEditors = new WeakMap();
+  var uploadNumber = 0;
+  function uploadTarget(editor) {
+    if (!editor) return null;
+    var session = composerSession(editor);
+    var stored = storedSession();
+    if (!session && !stored) return null;
+    if (!uploadEditors.has(editor)) uploadEditors.set(editor, ++uploadNumber);
+    return JSON.stringify([uploadDocument, uploadEditors.get(editor), session, stored]);
+  }
+
+  window.__dshAppUploadTarget = function () { return uploadTarget(composerEditor()); };
+
   function post(channel, value) {
     try {
       if (window[channel]) window[channel].postMessage(JSON.stringify(value));
@@ -370,7 +386,7 @@
 
   window.__dshAppCompose = async function (draft) {
     var result = { text: false, files: 0 };
-    // iOS correlates overlapping replies; legacy callers keep the same shape.
+    // Uploads and iOS correlate overlapping replies; legacy callers keep the same shape.
     if (draft && typeof draft.requestId === 'string') result.requestId = draft.requestId;
     // After whatever the app opened just before (a new conversation).
     var opening = window.__dshAppOpening;
@@ -383,11 +399,17 @@
     }
     var editor = await waitFor(composerEditor, 10000);
     if (!editor) return post('DshAppCompose', result);
+    var expectedUploadTarget = draft && draft.uploadTarget;
+    var stillUploadTarget = function () {
+      return !expectedUploadTarget || (composerEditor() === editor && uploadTarget(editor) === expectedUploadTarget);
+    };
+    if (!stillUploadTarget()) return post('DshAppCompose', result);
     if (draft && draft.requireOpenedTarget === true && opening && opening.newSessionBinding &&
         composerSession(editor) !== opening.newSessionBinding.confirmedSession) return post('DshAppCompose', result);
     var text = (draft && draft.text) || '';
     var files = (draft && draft.files) || [];
     editor.focus();
+    if (!stillUploadTarget()) return post('DshAppCompose', result);
     var before = editor.textContent || '';
     var attachmentEditor = draft && draft.composerAttachmentCount === true ? editor : null;
     var beforeFiles = attachmentCount(attachmentEditor);
@@ -404,15 +426,23 @@
     } catch (e) {}
     await sleep(400);
     var probe = text.trim().slice(0, 24);
-    var landed = function () { return !probe || (editor.textContent || '').indexOf(probe) >= 0; };
-    var canFallback = !draft || draft.guardTextFallback !== true ||
-      (editor.isConnected && document.activeElement === editor);
+    var paths = expectedUploadTarget ? text.split('\n').filter(function (line) {
+      return line.indexOf('- ') === 0;
+    }).map(function (line) { return line.slice(2); }) : [];
+    var landed = function () {
+      var contents = editor.textContent || '';
+      if (paths.length) return paths.every(function (path) { return contents.indexOf(path) >= 0; });
+      return !probe || contents.indexOf(probe) >= 0;
+    };
+    var canFallback = stillUploadTarget() &&
+      ((!expectedUploadTarget && (!draft || draft.guardTextFallback !== true)) ||
+        (editor.isConnected && document.activeElement === editor));
     if (text && !landed() && (editor.textContent || '') === before && canFallback) {
       // No paste handling for text: type it in instead.
       try { document.execCommand('insertText', false, text); } catch (e) {}
       await sleep(200);
     }
-    result.text = !!text && landed();
+    result.text = !!text && stillUploadTarget() && landed();
     result.files = Math.max(0, attachmentCount(attachmentEditor) - beforeFiles);
     post('DshAppCompose', result);
   };
