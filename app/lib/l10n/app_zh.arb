@@ -16497,6 +16497,8 @@
   "webAppSettings": "App 设置",
   "webSwitchHost": "切换主机",
   "webAttachmentTooLarge": "附件太大，没能带进网页版",
+  "webFileDropped": "附件太大，已直接放到电脑，路径填在输入框里",
+  "webFileDropFailed": "附件太大，也没能传到电脑",
   "webTextCopied": "文字已复制，粘贴到输入框即可",
   "webAttachmentFailed": "附件没能带进网页版",
   "webHostUnavailable": "这台主机打不开网页版",

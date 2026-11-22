@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/l10n.dart';
+import '../../remote/link_status.dart';
 import '../../remote/ssh/ssh_link.dart';
 import '../../state/android_features.dart';
 import '../../state/connection_state.dart';
@@ -33,9 +34,12 @@ final class LocalDshWeb extends DshWebAccess {
 /// DSH's browser fence accepts any loopback Host, so the WebView can talk to
 /// `127.0.0.1:<forward port>` directly; the launch token logs it in.
 final class SshDshWeb extends DshWebAccess {
-  const SshDshWeb(this.url, this.hostName);
+  const SshDshWeb(this.url, this.hostName, {this.files});
   final Uri url;
   final String hostName;
+
+  /// Takes a file the page cannot carry; null while the link is down.
+  final HostFileDrop? files;
 }
 
 /// A DSH Remote host: its DSH Web through the Remote tunnel, on the live
@@ -86,7 +90,7 @@ final dshWebAccessProvider = Provider.autoDispose<DshWebAccess>((ref) {
       if (port == null || token == null) {
         return NoDshWeb(appL10n.webConnectHostFirst(name));
       }
-      return SshDshWeb(localWebUri('http://127.0.0.1:$port', token), name);
+      return SshDshWeb(localWebUri('http://127.0.0.1:$port', token), name, files: link is SshHostLink ? link : null);
   }
 });
 

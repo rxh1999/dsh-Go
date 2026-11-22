@@ -287,6 +287,17 @@ abstract class HostLink {
   Future<void> close();
 }
 
+/// A link that can take a file the app's page must not carry, over the link
+/// itself: the bytes never enter a WebView renderer or the Host's HTTP API.
+///
+/// DSH's own answer to an unstaged file is a path the agent reads, so a Host
+/// that can write one answers with the path to mention in the prompt.
+abstract interface class HostFileDrop {
+  /// Writes [source] into the Host's workspace and returns the absolute path
+  /// to mention. Throws [HostLinkError] when the file cannot be written.
+  Future<String> dropFile(String name, Stream<List<int>> source);
+}
+
 /// Exponential backoff with full jitter: 1, 2, 4 … capped at [max].
 class Backoff {
   Backoff({

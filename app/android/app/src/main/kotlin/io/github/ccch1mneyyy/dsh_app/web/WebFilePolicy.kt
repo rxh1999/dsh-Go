@@ -7,6 +7,13 @@ import java.util.Locale
 internal object WebFilePolicy {
     private val mime = Regex("""^[a-z0-9!#$&^_.+-]+/([a-z0-9!#$&^_.+-]+|[*])$""")
 
+    /**
+     * The most one picker result may be over, however many files it holds. A
+     * content URI can claim any length; this is the app's own ceiling on what
+     * it is willing to copy into its cache for a Host.
+     */
+    const val HARD_MAX_BYTES = 2L * 1024 * 1024 * 1024
+
     fun acceptTypes(raw: List<String>, extensionType: (String) -> String?): List<String> {
         val types = raw.flatMap { it.split(',') }.mapNotNull {
             val value = it.trim().lowercase(Locale.ROOT)
@@ -20,5 +27,41 @@ internal object WebFilePolicy {
         val authority = uri.authority ?: return false
         return uri.scheme == "content" && authority.isNotEmpty() &&
             authority != appId && !authority.startsWith(appId + ".")
+    }
+
+    /**
+     * The size a provider declares for one picked file, or null when it
+     * declares nothing usable.
+     *
+     * `OpenableColumns.SIZE` answers for most providers. A non-positive value
+     * is not a size: several return 0 or -1 for documents they stream, so the
+     * descriptor's length is tried next, and `AssetFileDescriptor` uses -1 for
+     * "unknown" too.
+     */
+    fun declaredBytes(sizeColumn: Long?, descriptorLength: Long?): Long? {
+        if (sizeColumn != null && sizeColumn > 0) return sizeColumn
+        if (descriptorLength != null && descriptorLength > 0) return descriptorLength
+        return null
+    }
+
+    /**
+     * Whether the page may carry a file of [bytes].
+     *
+     * An unknown size stays allowed: refusing everything unmeasured would
+     * break the providers that answer nothing, and the picker would look
+     * broken for ordinary files. A known size over [maxBytes] is the case a
+     * WebView renderer cannot hold, and the one this ceiling exists for.
+     */
+    fun withinLimit(bytes: Long?, maxBytes: Long): Boolean = bytes == null || bytes <= maxBytes
+
+    /**
+     * The name of a staged copy. One path component, never `.` or `..`, no
+     * separator or control character, bounded: it comes from another app.
+     */
+    fun stagedName(raw: String?): String {
+        val component = (raw ?: "").substringAfterLast('/').substringAfterLast('\\')
+        val cleaned = component.filter { !it.isISOControl() && it != '/' && it != '\\' }.trim()
+        val safe = cleaned.take(96).trim()
+        return if (safe.isEmpty() || safe == "." || safe == "..") "file" else safe
     }
 }

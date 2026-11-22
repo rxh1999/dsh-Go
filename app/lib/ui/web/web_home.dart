@@ -20,6 +20,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show File;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,6 +32,7 @@ import '../../links/launcher_entries.dart';
 import '../../links/share_intake.dart';
 import '../../pets/overlay_channel.dart' show petOverlayChannelProvider;
 import '../../pets/pet_overlay_bridge.dart';
+import '../../remote/link_status.dart';
 import '../../state/android_features.dart';
 import '../../state/compose_inbox.dart';
 import '../../state/hosts_state.dart';
@@ -47,6 +49,7 @@ import '../shell/page_frame.dart';
 import '../theme/app_icons.dart';
 import 'dsh_web_launcher.dart';
 import 'local_web_screen.dart';
+import 'web_file_chooser.dart';
 import 'web_handle.dart';
 import 'web_target.dart';
 import 'web_view_page.dart';
@@ -144,6 +147,37 @@ class _WebHomeState extends ConsumerState<WebHome> {
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(problems.first)));
   }
 
+  /// A picked file too large for the page goes over the SSH link itself, and
+  /// its path into the composer: the shape a workspace upload already uses
+  /// ([stateWorkspaceFilesHint]), because that is what the model reads.
+  Future<void> _carryFiles(HostFileDrop host, List<WebStagedFile> staged, List<WebFileOversize> refused) async {
+    final paths = <String>[];
+    var failed = false;
+    for (final copy in staged) {
+      try {
+        paths.add(await host.dropFile(copy.name, File(copy.path).openRead()));
+      } on Object {
+        failed = true;
+      }
+    }
+    var notice = '';
+    if (paths.isNotEmpty) {
+      final text = [appL10n.stateWorkspaceFilesHint, for (final path in paths) '- ${jsonEncode(path)}'].join('\n');
+      final result = await _link.compose(text);
+      if (result.text) {
+        notice = appL10n.webFileDropped;
+      } else {
+        await Clipboard.setData(ClipboardData(text: text));
+        notice = appL10n.webTextCopied;
+      }
+    }
+    _tell([
+      if (notice.isNotEmpty) notice,
+      if (refused.isNotEmpty) appL10n.webAttachmentTooLarge,
+      if (failed) appL10n.webFileDropFailed,
+    ]);
+  }
+
   /// 切回原生界面: the native home opens on the conversation the page shows.
   Future<void> _toNative() async {
     final id = _webSession;
@@ -161,7 +195,7 @@ class _WebHomeState extends ConsumerState<WebHome> {
     final phoneLayout = ref.watch(settingsProvider.select((s) => s.webPhoneLayout));
     final Widget page = switch (access) {
       LocalDshWeb() => LocalWebScreen(handle: _handle, link: _link, onSession: _onSession),
-      SshDshWeb(:final url, :final hostName) => WebViewPage(
+      SshDshWeb(:final url, :final hostName, :final files) => WebViewPage(
         // A new forward (reconnect) or layout switch: a new page.
         key: ValueKey((url, phoneLayout)),
         url: url,
@@ -176,6 +210,8 @@ class _WebHomeState extends ConsumerState<WebHome> {
         root: true,
         link: _link,
         onSession: _onSession,
+        // A file this page cannot hold goes over the same SSH link.
+        onOversize: files == null ? null : (staged, refused) => _carryFiles(files, staged, refused),
       ),
       // A new Noise session (a reconnect): a new page and lease.
       RelayDshWeb(:final carrier, :final session) => RemoteWebPage(

@@ -48530,6 +48530,18 @@ abstract class L10n {
   /// **'附件太大，没能带进网页版'**
   String get webAttachmentTooLarge;
 
+  /// No description provided for @webFileDropped.
+  ///
+  /// In zh, this message translates to:
+  /// **'附件太大，已直接放到电脑，路径填在输入框里'**
+  String get webFileDropped;
+
+  /// No description provided for @webFileDropFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'附件太大，也没能传到电脑'**
+  String get webFileDropFailed;
+
   /// No description provided for @webTextCopied.
   ///
   /// In zh, this message translates to:

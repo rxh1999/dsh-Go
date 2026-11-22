@@ -6,6 +6,7 @@ import '../../l10n/l10n.dart';
 import '../link_status.dart';
 import 'local_forward.dart';
 import 'remote_bootstrap.dart';
+import 'remote_shell.dart';
 import 'ssh_host_config.dart';
 import 'ssh_transport.dart';
 
@@ -55,7 +56,7 @@ HostLinkError hostKeyMismatchError(SshHostConfig config, PresentedHostKey key) =
 /// The remote server binds 127.0.0.1 only, the token comes from its log, and
 /// the client presents `Host: 127.0.0.1:<remote port>` so DSH's Host fence
 /// accepts requests that arrive through the tunnel.
-class SshHostLink implements HostLink {
+class SshHostLink implements HostLink, HostFileDrop {
   SshHostLink({
     required this._config,
     required this._loadSecrets,
@@ -134,6 +135,44 @@ class SshHostLink implements HostLink {
 
   /// Configured working directory with `~` resolved on the remote.
   String? get resolvedWorkingDirectory => RemoteDshBootstrap.absolutePath(_config.workingDirectory, _endpoint?.home);
+
+  /// Dropped files land under the link's working directory — where the Host's
+  /// own tools already read and write — in one folder per drop, so the file
+  /// keeps its name and the folder is the thing to delete afterwards.
+  static const _dropRoot = '.dsh-go-uploads';
+  int _drops = 0;
+
+  @override
+  Future<String> dropFile(String name, Stream<List<int>> source) async {
+    final transport = _transport;
+    // No configured cwd is the home directory: that is where `dsh web` runs.
+    final workspace = resolvedWorkingDirectory ?? _endpoint?.home;
+    if (transport == null || _status.phase != HostLinkPhase.connected || workspace == null) {
+      throw HostLinkError(HostLinkErrorKind.unreachable, appL10n.webFileDropFailed, retryable: true);
+    }
+    final folder = '$workspace/$_dropRoot/${DateTime.now().millisecondsSinceEpoch}-${++_drops}';
+    final made = await transport.run('mkdir -p ${shQuote(folder)}');
+    if (!made.ok) {
+      throw HostLinkError(HostLinkErrorKind.other, appL10n.webFileDropFailed, detail: made.stderr.trim());
+    }
+    final path = '$folder/${_dropName(name)}';
+    try {
+      await transport.writeFile(path, source);
+    } on Object catch (e) {
+      // A half-written file is not a drop: take the folder back out.
+      unawaited(transport.run('rm -rf ${shQuote(folder)}').then((_) {}, onError: (Object _) {}));
+      throw HostLinkError(HostLinkErrorKind.other, appL10n.webFileDropFailed, detail: '$e');
+    }
+    return path;
+  }
+
+  /// One path component: the name came from another app's document provider.
+  static String _dropName(String raw) {
+    final component = raw.split('/').last.split(r'\').last;
+    final cleaned = component.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
+    final safe = cleaned.length <= 96 ? cleaned : cleaned.substring(0, 96);
+    return safe.isEmpty || safe == '.' || safe == '..' ? 'file' : safe;
+  }
 
   @override
   HostLinkStatus get status => _status;

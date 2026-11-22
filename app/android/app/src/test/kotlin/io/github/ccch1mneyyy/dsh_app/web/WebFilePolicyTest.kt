@@ -2,6 +2,7 @@ package io.github.ccch1mneyyy.dsh_app.web
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -27,5 +28,34 @@ class WebFilePolicyTest {
         assertFalse(WebFilePolicy.isExternalContent("content://" + app + "/private", app))
         assertFalse(WebFilePolicy.isExternalContent("content:///missing", app))
         assertFalse(WebFilePolicy.isExternalContent("https://example.com/file", app))
+    }
+
+    @Test fun aDeclaredSizePrefersTheColumnAndTreatsNonPositiveValuesAsUnknown() {
+        assertEquals(10L, WebFilePolicy.declaredBytes(10, null))
+        assertEquals(20L, WebFilePolicy.declaredBytes(-1, 20))
+        assertEquals(20L, WebFilePolicy.declaredBytes(0, 20))
+        assertNull(WebFilePolicy.declaredBytes(null, -1))
+        assertNull(WebFilePolicy.declaredBytes(0, 0))
+        assertNull(WebFilePolicy.declaredBytes(null, null))
+    }
+
+    @Test fun aKnownSizeOverTheCeilingIsRefusedAndAnUnknownOneStaysAllowed() {
+        val max = 32L * 1024 * 1024
+        assertTrue(WebFilePolicy.withinLimit(null, max))
+        assertTrue(WebFilePolicy.withinLimit(max, max))
+        assertFalse(WebFilePolicy.withinLimit(max + 1, max))
+    }
+
+    @Test fun aStagedNameIsAlwaysOneSafeComponent() {
+        assertEquals("report.pdf", WebFilePolicy.stagedName("Downloads/report.pdf"))
+        assertEquals("report.pdf", WebFilePolicy.stagedName("C:\\Users\\me\\report.pdf"))
+        assertEquals("x", WebFilePolicy.stagedName("a/b/../../x"))
+        assertEquals("file", WebFilePolicy.stagedName(null))
+        assertEquals("file", WebFilePolicy.stagedName(""))
+        assertEquals("file", WebFilePolicy.stagedName("."))
+        assertEquals("file", WebFilePolicy.stagedName(".."))
+        assertEquals("ab", WebFilePolicy.stagedName("a\u0001b"))
+        assertEquals(96, WebFilePolicy.stagedName("x".repeat(200)).length)
+        assertFalse(WebFilePolicy.stagedName("/etc/passwd").contains('/'))
     }
 }

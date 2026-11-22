@@ -48,6 +48,7 @@ class WebViewPage extends StatefulWidget {
     this.root = false,
     this.link,
     this.onSession,
+    this.onOversize,
   });
 
   final Uri url;
@@ -100,6 +101,12 @@ class WebViewPage extends StatefulWidget {
   /// With [dshWeb]: the conversation on screen, whenever it changes (from
   /// the client's stored selection; null for none).
   final ValueChanged<String?>? onSession;
+
+  /// A file the page cannot carry (over [maxWebFileBytes]), already copied
+  /// into the app cache: [staged] can go to the Host and be mentioned in the
+  /// composer, [refused] could not even be read. Null leaves the page saying
+  /// the file is too large.
+  final Future<void> Function(List<WebStagedFile> staged, List<WebFileOversize> refused)? onOversize;
 
   bool get _adapt => dshWeb && phoneLayout;
 
@@ -626,7 +633,7 @@ class _WebViewPageState extends State<WebViewPage> {
   late WebViewController _controller;
   late final AppLifecycleListener _lifecycle;
   late final WebViewGuard _guard = WebViewGuard(onGone: _onRendererGone);
-  final _files = WebFileChooser();
+  late final WebFileChooser _files = WebFileChooser(onOversize: _onOversize);
   int _progress = 0;
   bool _loading = true;
   String? _error;
@@ -881,8 +888,40 @@ class _WebViewPageState extends State<WebViewPage> {
 
   void _onOpened(JavaScriptMessage message) {
     final problem = DshWebOpenResult.parse(message.message)?.problem;
-    if (problem == null || !mounted) return;
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(problem)));
+    if (problem != null) _notice(problem);
+  }
+
+  /// A picked file the renderer must not be handed: to the Host when the
+  /// caller has a way to put it there, otherwise one sentence — a picker that
+  /// quietly did nothing reads as a broken page.
+  Future<void> _onOversize(List<WebFileOversize> files) async {
+    final carry = widget.onOversize;
+    if (carry == null) {
+      _notice(appL10n.webAttachmentTooLarge);
+      return;
+    }
+    final staged = <WebStagedFile>[];
+    final refused = <WebFileOversize>[];
+    for (final file in files) {
+      final copy = await _files.stage(file);
+      if (copy == null) {
+        refused.add(file);
+      } else {
+        staged.add(copy);
+      }
+    }
+    try {
+      await carry(staged, refused);
+    } finally {
+      for (final copy in staged) {
+        await WebFileChooser.discard(copy);
+      }
+    }
+  }
+
+  void _notice(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(text)));
   }
 
   @override

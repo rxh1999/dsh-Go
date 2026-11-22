@@ -19,6 +19,8 @@
   "webAppSettings": "App settings",
   "webSwitchHost": "Switch host",
   "webAttachmentTooLarge": "Attachment is too large for DSH Web",
+  "webFileDropped": "Too large for the page: put on the computer, path filled in",
+  "webFileDropFailed": "Too large for the page, and the computer didn’t take it",
   "webTextCopied": "Text copied. Paste it into the input box.",
   "webAttachmentFailed": "Couldn’t add attachments to DSH Web",
   "webHostUnavailable": "DSH Web isn’t available on this host",

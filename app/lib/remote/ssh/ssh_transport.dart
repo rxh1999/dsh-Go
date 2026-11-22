@@ -85,6 +85,11 @@ abstract class SshTransport implements RemoteShell {
   /// Opens a direct-tcpip channel to [host]:[port] as seen from the server.
   Future<TunnelChannel> openTunnel(String host, int port);
 
+  /// Writes [source] to [path] on the remote, creating or replacing it. The
+  /// bytes go over this connection, never through a WebView or the Host's
+  /// HTTP API; the directory is not created here.
+  Future<void> writeFile(String path, Stream<List<int>> source);
+
   /// Round-trips a keepalive; throws or times out when the link is dead.
   Future<void> ping({Duration timeout = const Duration(seconds: 10)});
 
@@ -104,6 +109,10 @@ class DartSshTransport implements SshTransport, RemoteBootstrapShell {
   DartSshTransport.fromClient(this._client);
 
   final SSHClient _client;
+
+  /// One SFTP subsystem channel per connection, opened on first use: a link
+  /// that never writes a file never opens one.
+  SftpClient? _sftp;
 
   static Future<SshTransport> connect(SshConnectParams params, HostKeyCheck verifyHostKey) async {
     List<SSHKeyPair>? identities;
@@ -433,6 +442,23 @@ class DartSshTransport implements SshTransport, RemoteBootstrapShell {
       // 2 = SSH_OPEN_CONNECT_FAILED: nothing listens on that port anymore.
       if (e.code == 2) throw TunnelRefused(e);
       rethrow;
+    }
+  }
+
+  @override
+  Future<void> writeFile(String path, Stream<List<int>> source) async {
+    // The SFTP subsystem is the only way to put bytes on the remote that does
+    // not go through a shell: no quoting, no size or encoding limits, and the
+    // stream never has to be held in memory whole.
+    final sftp = _sftp ??= await _client.sftp();
+    final file = await sftp.open(
+      path,
+      mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate,
+    );
+    try {
+      await file.write(source.map((chunk) => chunk is Uint8List ? chunk : Uint8List.fromList(chunk))).done;
+    } finally {
+      await file.close();
     }
   }
 

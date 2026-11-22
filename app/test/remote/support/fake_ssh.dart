@@ -18,6 +18,9 @@ class FakeRemote {
 
   /// What `dsh` does when started.
   bool dshInstalled = true;
+
+  /// Files written over the transport, by remote path.
+  final Map<String, List<int>> files = {};
   final List<Object> tunnelErrors = [];
 
   /// Kills the managed server (reboot / crash).
@@ -91,6 +94,16 @@ class FakeTransport implements SshTransport {
   /// Simulates the network dropping the connection.
   void drop() {
     if (!_done.isCompleted) _done.complete();
+  }
+
+  @override
+  Future<void> writeFile(String path, Stream<List<int>> source) async {
+    if (_done.isCompleted) throw const HostLinkError(HostLinkErrorKind.unreachable, 'closed', retryable: true);
+    final bytes = <int>[];
+    await for (final chunk in source) {
+      bytes.addAll(chunk);
+    }
+    remote.files[path] = bytes;
   }
 
   @override
